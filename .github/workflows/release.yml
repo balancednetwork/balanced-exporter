@@ -1,0 +1,88 @@
+name: push-main-dockerhub
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Install deps
+        run: |
+          pip3 install -r requirements-api.txt -r requirements-worker.txt -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: make test
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      tag: ${{ steps.source.outputs.TAG }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - id: last
+        uses: pozetroninc/github-action-get-latest-release@master
+        with:
+          repository: ${{ github.repository }}
+
+      - name: Tag name
+        id: source
+        run: |
+          echo ::set-output name=TAG::${{ steps.last.outputs.release }}-${{ github.run_number }}
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: balancednetwork/balanced-exporter:latest, balancednetwork/balanced-exporter:${{ steps.source.outputs.TAG }}
+
+  push_refs:
+    runs-on: ubuntu-latest
+    needs: docker
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - cluster: prod-sng
+            network_name: mainnet
+          - cluster: prod-ams
+            network_name: mainnet
+
+    steps:
+      - name: Checkout charts repo
+        uses: actions/checkout@v2
+        with:
+          repository: balancednetwork/balanced-community-infra
+          ref: main
+          path: charts
+          token: ${{ secrets.INFRA_DEPLOYMENT_PAT }}
+
+      - name: Update ${{ matrix.cluster }}/${{ matrix.network_name }} deployment values file
+        uses: fjogeleit/yaml-update-action@master
+        with:
+          workDir: charts
+          repository: balancednetwork/balanced-community-infra
+          valueFile: 'deployments/${{ matrix.cluster }}/${{ matrix.network_name }}/backend-exporter/tags.yaml'
+          propertyPath: 'image.tag'
+          value: ${{needs.docker.outputs.tag}}
+          branch: main
+          createPR: 'false'
+          updateFile: true
+          commitChange: false
